@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# Runs ONCE: checks the wallet, texts Telegram on new opens/closes, saves state.
+# Runs ONCE: checks the wallet across ALL perp venues, texts Telegram on
+# new opens/closes, saves state.
 import os
 import json
 import urllib.request
@@ -31,21 +32,48 @@ def short(a):
     return a[:6] + "…" + a[-4:]
 
 
+def list_dexes():
+    # "" = the main (native) venue; plus every builder-deployed venue.
+    names = [""]
+    try:
+        for d in post_json(HL_INFO_URL, {"type": "perpDexs"}):
+            if d and d.get("name"):
+                names.append(d["name"])
+    except Exception as e:
+        print("perpDexs error, using main venue only:", e)
+    return names
+
+
 def fetch_positions(wallet):
-    data = post_json(HL_INFO_URL, {"type": "clearinghouseState", "user": wallet})
     out = {}
-    for ap in data.get("assetPositions", []):
-        p = ap.get("position", {})
-        szi = float(p.get("szi") or 0)
-        if szi == 0:
+    for dex in list_dexes():
+        payload = {"type": "clearinghouseState", "user": wallet}
+        if dex:
+            payload["dex"] = dex
+        try:
+            data = post_json(HL_INFO_URL, payload)
+        except Exception as e:
+            print(f"venue '{dex or 'main'}' error:", e)
             continue
-        lev = p.get("leverage", {}) or {}
-        out[p["coin"]] = {
-            "side": "LONG" if szi > 0 else "SHORT",
-            "entry": float(p.get("entryPx") or 0),
-            "lev": f"{lev.get('value', '?')}x {lev.get('type', '')}".strip(),
-            "value": float(p.get("positionValue") or 0),
-        }
+        for ap in data.get("assetPositions", []):
+            p = ap.get("position", {})
+            szi = float(p.get("szi") or 0)
+            if szi == 0:
+                continue
+            coin = p["coin"]
+            if dex and not coin.startswith(dex + ":"):
+                label = f"{dex}:{coin}"
+            else:
+                label = coin
+            key = label
+            lev = p.get("leverage", {}) or {}
+            out[key] = {
+                "label": label,
+                "side": "LONG" if szi > 0 else "SHORT",
+                "entry": float(p.get("entryPx") or 0),
+                "lev": f"{lev.get('value', '?')}x {lev.get('type', '')}".strip(),
+                "value": float(p.get("positionValue") or 0),
+            }
     return out
 
 
@@ -74,7 +102,7 @@ def main():
     if not WALLET:
         raise SystemExit("HL_WALLET not set.")
     curr = fetch_positions(WALLET)
-    curr_sides = {c: v["side"] for c, v in curr.items()}
+    curr_sides = {k: v["side"] for k, v in curr.items()}
     prev = load_state()
 
     if prev is None:
@@ -84,17 +112,17 @@ def main():
         print("Baseline saved.")
         return
 
-    for coin, pos in curr.items():
-        old = prev.get(coin)
+    for key, pos in curr.items():
+        old = prev.get(key)
         if old is None or old != pos["side"]:
-            send(f"🔔 New position\n{short(WALLET)}\n{coin} {pos['side']}\n"
+            send(f"🔔 New position\n{short(WALLET)}\n{pos['label']} {pos['side']}\n"
                  f"Entry {fmt_price(pos['entry'])}\nLeverage {pos['lev']}\n"
                  f"Size ~${pos['value']:,.0f}")
 
     if ALERT_ON_CLOSE:
-        for coin in prev:
-            if coin not in curr:
-                send(f"✅ Closed {coin} position ({short(WALLET)})")
+        for key in prev:
+            if key not in curr:
+                send(f"✅ Closed {key} position ({short(WALLET)})")
 
     STATE_FILE.write_text(json.dumps(curr_sides))
     print("Done. Open now:", list(curr_sides))
