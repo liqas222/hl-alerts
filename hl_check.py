@@ -28,10 +28,6 @@ def fmt_price(x):
     return f"${x:,.2f}" if x >= 1 else f"${x:.6g}"
 
 
-def short(a):
-    return a[:6] + "…" + a[-4:]
-
-
 def list_dexes():
     # "" = the main (native) venue; plus every builder-deployed venue.
     names = [""]
@@ -60,18 +56,19 @@ def fetch_positions(wallet):
             szi = float(p.get("szi") or 0)
             if szi == 0:
                 continue
-            coin = p["coin"]
-            if dex and not coin.startswith(dex + ":"):
-                label = f"{dex}:{coin}"
-            else:
-                label = coin
-            key = label
+            raw = p["coin"]
+            bare = raw.split(":", 1)[1] if ":" in raw else raw
+            key = f"{dex}:{bare}" if dex else bare
             lev = p.get("leverage", {}) or {}
             out[key] = {
-                "label": label,
+                "coin": bare,
+                "kind": "🪙 Crypto" if not dex else "📈 Stock",
                 "side": "LONG" if szi > 0 else "SHORT",
                 "entry": float(p.get("entryPx") or 0),
-                "lev": f"{lev.get('value', '?')}x {lev.get('type', '')}".strip(),
+                "liq": float(p.get("liquidationPx") or 0),
+                "lev": f"{lev.get('value', '?')}x",
+                "mode": (lev.get("type", "") or "").capitalize(),
+                "margin": float(p.get("marginUsed") or 0),
                 "value": float(p.get("positionValue") or 0),
             }
     return out
@@ -87,6 +84,20 @@ def send(text):
         print("Sent:", text.splitlines()[0])
     except Exception as e:
         print("Telegram error:", e)
+
+
+def open_message(pos):
+    liq = fmt_price(pos["liq"]) if pos["liq"] else "—"
+    return (
+        f"🔔 New position\n"
+        f"{pos['kind']}\n"
+        f"{pos['coin']} {pos['side']}\n"
+        f"Entry {fmt_price(pos['entry'])}\n"
+        f"Liq {liq}\n"
+        f"Leverage {pos['lev']}\n"
+        f"Size ~${pos['value']:,.0f}\n"
+        f"Margin ${pos['margin']:,.0f} {pos['mode']}"
+    )
 
 
 def load_state():
@@ -107,22 +118,21 @@ def main():
 
     if prev is None:
         STATE_FILE.write_text(json.dumps(curr_sides))
-        send(f"✅ Alert bot is live and watching {short(WALLET)} "
-             f"({len(curr)} open position(s)). I'll message you on new opens and closes.")
+        send(f"✅ Alert bot is live ({len(curr)} open position(s)). "
+             f"I'll message you on new opens and closes.")
         print("Baseline saved.")
         return
 
     for key, pos in curr.items():
         old = prev.get(key)
         if old is None or old != pos["side"]:
-            send(f"🔔 New position\n{short(WALLET)}\n{pos['label']} {pos['side']}\n"
-                 f"Entry {fmt_price(pos['entry'])}\nLeverage {pos['lev']}\n"
-                 f"Size ~${pos['value']:,.0f}")
+            send(open_message(pos))
 
     if ALERT_ON_CLOSE:
         for key in prev:
             if key not in curr:
-                send(f"✅ Closed {key} position ({short(WALLET)})")
+                coin = key.split(":", 1)[1] if ":" in key else key
+                send(f"✅ Closed {coin} position")
 
     STATE_FILE.write_text(json.dumps(curr_sides))
     print("Done. Open now:", list(curr_sides))
