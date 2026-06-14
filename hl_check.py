@@ -8,12 +8,14 @@ from pathlib import Path
 
 # ============================================================
 #   WALLETS TO WATCH — add or remove addresses here.
+#   The order sets the label: 1st = "Wallet 1", 2nd = "Wallet 2"...
 # ============================================================
 WALLETS = [
     "0x0c349d9b92fbd172bbb5a17a9db0a673a6a10ad3",
     "0x1aa780bb10425b86bcf05ecbb7953f9a93729ed9",
 ]
 WALLETS = [w.strip().lower() for w in WALLETS if w.strip()]
+WALLET_NUM = {w: i + 1 for i, w in enumerate(WALLETS)}
 # ============================================================
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")   # stays in the GitHub secret
@@ -102,7 +104,8 @@ def open_message(wallet, pos):
     liq = fmt_price(pos["liq"]) if pos["liq"] else "—"
     return (
         f"🔔 New position\n"
-        f"👤 {short(wallet)}\n"
+        f"👤 Wallet {WALLET_NUM.get(wallet, '?')}\n"
+        f"{short(wallet)}\n"
         f"{pos['kind']}\n"
         f"{pos['coin']} {pos['side']}\n"
         f"Entry {fmt_price(pos['entry'])}\n"
@@ -159,7 +162,8 @@ def main():
             if ckey not in curr_sides:
                 wallet, poskey = ckey.split("|", 1)
                 coin = poskey.split(":", 1)[1] if ":" in poskey else poskey
-                send(f"✅ Closed {coin} position\n👤 {short(wallet)}")
+                num = WALLET_NUM.get(wallet, "?")
+                send(f"✅ Closed {coin} position\n👤 Wallet {num}\n{short(wallet)}")
 
     STATE_FILE.write_text(json.dumps(curr_sides))
     print("Done. Open now:", list(curr_sides))
