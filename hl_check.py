@@ -1,13 +1,22 @@
 #!/usr/bin/env python3
-# Runs ONCE: checks the wallet across ALL perp venues, texts Telegram on
-# new opens/closes, saves state.
+# Runs ONCE: checks the wallets below across ALL perp venues,
+# texts Telegram on new opens/closes, saves state.
 import os
 import json
 import urllib.request
 from pathlib import Path
 
-WALLET = os.environ.get("HL_WALLET", "").lower()
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+# ============================================================
+#   WALLETS TO WATCH — add or remove addresses here.
+# ============================================================
+WALLETS = [
+    "0x0c349d9b92fbd172bbb5a17a9db0a673a6a10ad3",
+    "0x1aa780bb10425b86bcf05ecbb7953f9a93729ed9",
+]
+WALLETS = [w.strip().lower() for w in WALLETS if w.strip()]
+# ============================================================
+
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")   # stays in the GitHub secret
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "1253059682")
 ALERT_ON_CLOSE = os.environ.get("ALERT_ON_CLOSE", "true").lower() == "true"
 
@@ -28,8 +37,11 @@ def fmt_price(x):
     return f"${x:,.2f}" if x >= 1 else f"${x:.6g}"
 
 
+def short(a):
+    return a[:6] + "…" + a[-4:]
+
+
 def list_dexes():
-    # "" = the main (native) venue; plus every builder-deployed venue.
     names = [""]
     try:
         for d in post_json(HL_INFO_URL, {"type": "perpDexs"}):
@@ -40,16 +52,16 @@ def list_dexes():
     return names
 
 
-def fetch_positions(wallet):
+def fetch_positions(wallet, dexes):
     out = {}
-    for dex in list_dexes():
+    for dex in dexes:
         payload = {"type": "clearinghouseState", "user": wallet}
         if dex:
             payload["dex"] = dex
         try:
             data = post_json(HL_INFO_URL, payload)
         except Exception as e:
-            print(f"venue '{dex or 'main'}' error:", e)
+            print(f"venue '{dex or 'main'}' error for {short(wallet)}:", e)
             continue
         for ap in data.get("assetPositions", []):
             p = ap.get("position", {})
@@ -58,9 +70,9 @@ def fetch_positions(wallet):
                 continue
             raw = p["coin"]
             bare = raw.split(":", 1)[1] if ":" in raw else raw
-            key = f"{dex}:{bare}" if dex else bare
+            poskey = f"{dex}:{bare}" if dex else bare
             lev = p.get("leverage", {}) or {}
-            out[key] = {
+            out[poskey] = {
                 "coin": bare,
                 "kind": "🪙 Crypto" if not dex else "📈 Stock",
                 "side": "LONG" if szi > 0 else "SHORT",
@@ -86,10 +98,11 @@ def send(text):
         print("Telegram error:", e)
 
 
-def open_message(pos):
+def open_message(wallet, pos):
     liq = fmt_price(pos["liq"]) if pos["liq"] else "—"
     return (
         f"🔔 New position\n"
+        f"👤 {short(wallet)}\n"
         f"{pos['kind']}\n"
         f"{pos['coin']} {pos['side']}\n"
         f"Entry {fmt_price(pos['entry'])}\n"
@@ -110,29 +123,43 @@ def load_state():
 
 
 def main():
-    if not WALLET:
-        raise SystemExit("HL_WALLET not set.")
-    curr = fetch_positions(WALLET)
-    curr_sides = {k: v["side"] for k, v in curr.items()}
+    if not WALLETS:
+        raise SystemExit("No wallets configured.")
+
+    dexes = list_dexes()
+
+    curr_full = {}   # "wallet|positionkey" -> (wallet, position)
+    curr_sides = {}  # "wallet|positionkey" -> side
+    for wallet in WALLETS:
+        for poskey, pos in fetch_positions(wallet, dexes).items():
+            ckey = f"{wallet}|{poskey}"
+            curr_full[ckey] = (wallet, pos)
+            curr_sides[ckey] = pos["side"]
+
     prev = load_state()
+    # Migrate old single-wallet state (keys without "|") -> re-baseline cleanly.
+    if prev and not all("|" in k for k in prev):
+        print("Old state format detected; re-baselining without alerts.")
+        prev = None
 
     if prev is None:
         STATE_FILE.write_text(json.dumps(curr_sides))
-        send(f"✅ Alert bot is live ({len(curr)} open position(s)). "
-             f"I'll message you on new opens and closes.")
+        send(f"✅ Alert bot is live — watching {len(WALLETS)} wallet(s), "
+             f"{len(curr_sides)} open position(s). I'll message you on new opens and closes.")
         print("Baseline saved.")
         return
 
-    for key, pos in curr.items():
-        old = prev.get(key)
+    for ckey, (wallet, pos) in curr_full.items():
+        old = prev.get(ckey)
         if old is None or old != pos["side"]:
-            send(open_message(pos))
+            send(open_message(wallet, pos))
 
     if ALERT_ON_CLOSE:
-        for key in prev:
-            if key not in curr:
-                coin = key.split(":", 1)[1] if ":" in key else key
-                send(f"✅ Closed {coin} position")
+        for ckey in prev:
+            if ckey not in curr_sides:
+                wallet, poskey = ckey.split("|", 1)
+                coin = poskey.split(":", 1)[1] if ":" in poskey else poskey
+                send(f"✅ Closed {coin} position\n👤 {short(wallet)}")
 
     STATE_FILE.write_text(json.dumps(curr_sides))
     print("Done. Open now:", list(curr_sides))
